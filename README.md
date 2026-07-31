@@ -1,15 +1,12 @@
 # Perceptive Humanoid Parkour
 
-基于 **Isaac Sim 5.1** + **Isaac Lab 2.3.2** 的感知人形越障训练仓库。
-
-环境安装步骤参考官方教程：
-[Installation using Isaac Sim Pip Package (Isaac Lab v2.3.2)](https://isaac-sim.github.io/IsaacLab/v2.3.2/source/setup/installation/pip_installation.html)
+基于 **Isaac Sim 5.1** + **Isaac Lab 2.3.2** 的感知人形跑酷训练仓库（非最终版）
 
 ## 环境安装
 
 ### 1. 创建 Python 环境
 
-Isaac Sim 5.X 需要 **Python 3.11**。
+Isaac Sim 5.1 需要 **Python 3.11**。
 
 ```bash
 conda create -n php python=3.11
@@ -19,29 +16,9 @@ pip install --upgrade pip
 
 ### 2. 安装 Isaac Sim 5.1 与 PyTorch
 
-```bash
-pip install "isaacsim[all,extscache]==5.1.0" --extra-index-url https://pypi.nvidia.com
+参考官方教程：
 
-# Linux x86_64
-pip install -U torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
-```
-
-首次运行 `isaacsim` 需接受 EULA，并会拉取扩展缓存（可能较慢）。
-
-### 3. 安装 Isaac Lab 2.3.2
-
-请从源码安装，并切换到 **`v2.3.2`** 标签（不要用当前 `main`，其可能对应更新的 Isaac Sim）：
-
-```bash
-git clone https://github.com/isaac-sim/IsaacLab.git
-cd IsaacLab
-git checkout v2.3.2
-
-# Linux 依赖（robomimic 等）
-sudo apt install cmake build-essential
-
-./isaaclab.sh --install
-```
+[Installation using Isaac Sim Pip Package (Isaac Lab v2.3.2)](https://isaac-sim.github.io/IsaacLab/v2.3.2/source/setup/installation/pip_installation.html)
 
 可用官方示例验证：
 
