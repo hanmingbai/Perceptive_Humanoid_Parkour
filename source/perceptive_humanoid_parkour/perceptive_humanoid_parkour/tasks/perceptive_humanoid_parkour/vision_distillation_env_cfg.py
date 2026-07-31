@@ -1,0 +1,479 @@
+from __future__ import annotations
+
+from dataclasses import MISSING
+
+import isaaclab.sim as sim_utils
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
+from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import ContactSensorCfg
+from isaaclab.terrains import TerrainImporterCfg
+from isaaclab.sensors import CameraCfg, TiledCameraCfg
+##
+# Pre-defined configs
+##
+from isaaclab.utils import configclass
+from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+
+import perceptive_humanoid_parkour.tasks.perceptive_humanoid_parkour.mdp as mdp
+
+##
+# 高程图
+## 
+from isaaclab.sensors.ray_caster import RayCasterCfg, RayCasterData, MultiMeshRayCasterCfg
+from isaaclab.sensors.ray_caster.patterns import GridPatternCfg
+import isaaclab.utils.math as math_utils
+
+# camera
+# from isaaclab.managers import EventTermCfg
+# import isaaclab.envs.mdp.randomizations as rand_funcs
+
+##
+# Scene definition
+##
+
+VELOCITY_RANGE = {
+    "x": (-0.1, 0.1),
+    "y": (-0.1, 0.1),
+    "z": (-0.05, 0.05),
+    "roll": (-0.1, 0.1),
+    "pitch": (-0.1, 0.1),
+    "yaw": (-0.1, 0.1),
+}
+
+OBJ_SIZE_MAP = {
+    # "obj_0_3m_0_4m": (1.0, 0.3, 0.4),
+    # "obj_0_4m_0_4m": (1.0, 0.4, 0.4),
+    # "obj_1m": (3.0, 0.2, 0.75),
+    # "obj_1_5m": (3.0, 0.2, 1.1),
+    "obj_0_4m_1_0m_0_4m": (0.4, 1.0, 0.4),
+}
+
+def attach_object_pool(cfg_class):
+    """动态将 OBJ_SIZE_MAP 中的物体注入到配置类中"""
+    for name, size in OBJ_SIZE_MAP.items():
+        obj_cfg = RigidObjectCfg(
+            prim_path=f"{{ENV_REGEX_NS}}/{name}",
+            spawn=sim_utils.CuboidCfg(
+                size=size,
+                physics_material=sim_utils.RigidBodyMaterialCfg(
+                    static_friction=1.0,
+                    dynamic_friction=1.0,
+                ),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 1.0)),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                    kinematic_enabled=True, 
+                    disable_gravity=True
+                ),
+            ),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -1.5)),
+        )
+        # 核心：使用 setattr 确保这些属性真正属于这个类
+        setattr(cfg_class, name, obj_cfg)
+    return cfg_class
+
+_MESH_TARGETS = [
+    MultiMeshRayCasterCfg.RaycastTargetCfg(
+        prim_expr="/World/ground", 
+        track_mesh_transforms=False
+    ),
+    MultiMeshRayCasterCfg.RaycastTargetCfg(
+        prim_expr="/World/envs/env_.*/obj_.*",
+        track_mesh_transforms=True
+    ),
+]
+
+@attach_object_pool
+@configclass
+class MySceneCfg(InteractiveSceneCfg):
+    """Configuration for the terrain scene with a legged robot."""
+
+    # ground terrain
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="plane",
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+        ),
+        visual_material=sim_utils.MdlFileCfg(
+            mdl_path="{NVIDIA_NUCLEUS_DIR}/Materials/Base/Architecture/Shingles_01.mdl",
+            project_uvw=True,
+        ),
+    )
+
+    # 定义深度相机
+    tiled_camera = TiledCameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/torso_link/d435_link/Depth_Camera",
+        # update_period=0.033, # 30Hz 采样
+        width=87, 
+        height=58,
+        data_types=["distance_to_image_plane"], # 核心：只开启深度图，不开启 RGB，节省大量显存和计算资源
+        spawn=sim_utils.PinholeCameraCfg(
+            # focus_distance=400.0, # 与深度图信息无关，但是开启RGB则需要调整焦距和对焦距离以获得清晰的图像
+            focal_length=11.2, 
+            horizontal_aperture=20.955,
+            clipping_range=(0.15, 2.0), # clipping范围参考《Parkour in the wild: Learning a general and extensible agile locomotion policy using multi-expert distillation and RL Fine-tuning》
+        ),
+        offset=TiledCameraCfg.OffsetCfg(pos=(0.0, 0, 0.), rot=(0.5, -0.5, 0.5, -0.5)), # 这个会影响网络输出，去掉则机器人会跌倒
+    )
+
+    # robots
+    robot: ArticulationCfg = MISSING
+    # lights
+    light = AssetBaseCfg(
+        prim_path="/World/light",
+        spawn=sim_utils.DistantLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
+    )
+    sky_light = AssetBaseCfg(
+        prim_path="/World/skyLight",
+        spawn=sim_utils.DomeLightCfg(color=(0.13, 0.13, 0.13), intensity=1000.0),
+    )
+    contact_forces = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True, force_threshold=10.0, debug_vis=True
+    )
+
+    # 添加高程图扫描
+    height_scanner = MultiMeshRayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/torso_link", 
+        offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)), 
+        ray_alignment="yaw",
+        pattern_cfg=GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
+        # pattern_cfg=GridPatternCfg(resolution=0.1, size=[1.4, 1.4]),
+        mesh_prim_paths=_MESH_TARGETS, 
+        debug_vis=True,
+    )
+
+##
+# MDP settings
+##
+
+
+@configclass
+class CommandsCfg:
+    """Command specifications for the MDP."""
+
+    motion = mdp.MotionCommandCfg(
+        asset_name="robot",
+        resampling_time_range=(1.0e9, 1.0e9),
+        debug_vis=True,
+        pose_range={
+            "x": (-0.05, 0.05),
+            "y": (-0.05, 0.05),
+            "z": (-0.01, 0.01),
+            "roll": (-0.1, 0.1),
+            "pitch": (-0.1, 0.1),
+            "yaw": (-0.2, 0.2),
+        },
+        velocity_range=VELOCITY_RANGE,
+        joint_position_range=(-0.1, 0.1),
+    )
+
+
+@configclass
+class ActionsCfg:
+    """Action specifications for the MDP."""
+
+    joint_pos = mdp.JointPositionActionCfg(asset_name="robot", joint_names=[".*"], use_default_offset=True)
+
+
+@configclass
+class ObservationsCfg:
+    """Observation specifications for the MDP."""
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        """Observations for policy group."""
+
+        # observation terms (order preserved)
+        # MotionCommand
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, noise=Unoise(n_min=-0.2, n_max=0.2)) # 3
+        projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05)) # 3
+        velocity_command = ObsTerm(func=mdp.motion_velocity_command_bool, params={"command_name": "motion"}) # 31
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01)) # 29
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.5, n_max=0.5)) # 29
+        actions = ObsTerm(func=mdp.last_action) # 29
+        # depth information
+        depth_flatten = ObsTerm(func=mdp.get_clipped_depth_obs, params={"sensor_name": "tiled_camera"})
+
+
+        def __post_init__(self):
+            self.enable_corruption = True
+            self.concatenate_terms = True
+
+    @configclass
+    class PrivilegedCfg(ObsGroup):
+        # MotionCommand
+        command = ObsTerm(func=mdp.generated_commands, params={"command_name": "motion"}) # observation_manager.generated_commands = MotionCommand.command(joint_pos, joint_vel)
+        motion_anchor_pos_b = ObsTerm(func=mdp.motion_anchor_pos_b, params={"command_name": "motion"})
+        motion_anchor_ori_b = ObsTerm(func=mdp.motion_anchor_ori_b, params={"command_name": "motion"})
+        body_pos = ObsTerm(func=mdp.robot_body_pos_b, params={"command_name": "motion"})
+        body_ori = ObsTerm(func=mdp.robot_body_ori_b, params={"command_name": "motion"})
+        # Proprioception
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel)
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel)
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel)
+        actions = ObsTerm(func=mdp.last_action)
+
+        # depth information
+        # depth_flatten = ObsTerm(func=mdp.get_clipped_depth_obs, params={"sensor_name": "tiled_camera"})
+
+        # 高程图信息
+        height_scan = ObsTerm(
+            func=mdp.height_scan,
+            params={"sensor_cfg": SceneEntityCfg("height_scanner")},
+            noise=Unoise(n_min=-0.1, n_max=0.1),
+            clip=(-1.0, 1.0),
+        )
+
+    @configclass
+    class TeacherCfg(ObsGroup):
+        """Observations for policy group."""
+
+        # observation terms (order preserved)
+        # MotionCommand
+        command = ObsTerm(func=mdp.generated_commands, params={"command_name": "motion"})
+        motion_anchor_pos_b = ObsTerm(func=mdp.motion_anchor_pos_b, params={"command_name": "motion"})
+        motion_anchor_ori_b = ObsTerm(func=mdp.motion_anchor_ori_b, params={"command_name": "motion"})
+        body_pos = ObsTerm(func=mdp.robot_body_pos_b, params={"command_name": "motion"}, noise=Unoise(n_min=-0.25, n_max=0.25))
+        body_ori = ObsTerm(func=mdp.robot_body_ori_b, params={"command_name": "motion"}, noise=Unoise(n_min=-0.05, n_max=0.05))
+        # Proprioception
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, noise=Unoise(n_min=-0.5, n_max=0.5))
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.2, n_max=0.2))
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.5, n_max=0.5))
+        actions = ObsTerm(func=mdp.last_action)
+
+        # 高程图信息
+        height_scan = ObsTerm(
+            func=mdp.height_scan,
+            params={"sensor_cfg": SceneEntityCfg("height_scanner")},
+            noise=Unoise(n_min=-0.1, n_max=0.1),
+            clip=(-1.0, 1.0),
+        )
+
+        def __post_init__(self):
+            self.enable_corruption = True
+            self.concatenate_terms = True
+
+    # observation groups
+    policy: PolicyCfg = PolicyCfg()
+    critic: PrivilegedCfg = PrivilegedCfg()
+    teacher: TeacherCfg = TeacherCfg()
+
+
+@configclass
+class EventCfg:
+    """Configuration for events."""
+
+    # startup
+    physics_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "static_friction_range": (0.4, 1.3),
+            "dynamic_friction_range": (0.4, 1.1),
+            "restitution_range": (0.0, 0.5),
+            "num_buckets": 64,
+        },
+    )
+
+    add_joint_default_pos = EventTerm(
+        func=mdp.randomize_joint_default_pos,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),
+            "pos_distribution_params": (-0.01, 0.01),
+            "operation": "add",
+        },
+    )
+
+    base_com = EventTerm(
+        func=mdp.randomize_rigid_body_com,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
+            "com_range": {"x": (-0.025, 0.025), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
+        },
+    )
+
+    # interval
+    push_robot = EventTerm(
+        func=mdp.push_by_setting_velocity,
+        mode="interval",
+        interval_range_s=(1.0, 3.0),
+        params={"velocity_range": VELOCITY_RANGE},
+    )
+
+    # # reset camera
+    # reset_camera_pos = EventTerm(
+    #     func=mdp.reset_prop_pose, # 随机化属性位姿
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("depth_camera"),
+    #         "position_range": (-0.02, 0.02), # 左右上下前后偏移 2cm
+    #         "orientation_range": (-0.05, 0.05), # 约 3 度的旋转偏差
+    #     },
+    #     mode="reset", # 仅在环境重置时触发
+    # )
+
+    # randomize_intrinsics = EventTermCfg(
+    #     func=mdp.randomize_camera_intrinsics,
+    #     params={"asset_cfg": SceneEntityCfg("depth_camera")},
+    #     mode="reset",
+    # )
+
+
+@configclass
+class RewardsCfg:
+    """Reward terms for the MDP."""
+    # 蒸馏时 actor obs无位置和姿态信息，改为速度跟踪
+    motion_global_anchor_pos = RewTerm(
+        func=mdp.motion_global_anchor_position_error_exp,
+        weight=0.5,
+        params={"command_name": "motion", "std": 0.3},
+    )
+    motion_global_anchor_ori = RewTerm(
+        func=mdp.motion_global_anchor_orientation_error_exp,
+        weight=0.5,
+        params={"command_name": "motion", "std": 0.4},
+    )
+    
+    # motion_global_anchor_lin_vel_xy = RewTerm(
+    #     func=mdp.motion_global_anchor_lin_vel_xy_error_exp,
+    #     weight=1.0,
+    #     params={"command_name": "motion", "std": 0.25},
+    # )
+
+    # motion_global_anchor_ang_vel_yaw = RewTerm(
+    #     func=mdp.motion_global_anchor_ang_vel_yaw_error_exp,
+    #     weight=0.5,
+    #     params={"command_name": "motion", "std": 0.25},
+    # )
+
+    motion_body_pos = RewTerm(
+        func=mdp.motion_relative_body_position_error_exp,
+        weight=1.0,
+        params={"command_name": "motion", "std": 0.3},
+    )
+    motion_body_ori = RewTerm(
+        func=mdp.motion_relative_body_orientation_error_exp,
+        weight=1.0,
+        params={"command_name": "motion", "std": 0.4},
+    )
+    motion_body_lin_vel = RewTerm(
+        func=mdp.motion_global_body_linear_velocity_error_exp,
+        weight=1.0,
+        params={"command_name": "motion", "std": 1.0},
+    )
+    motion_body_ang_vel = RewTerm(
+        func=mdp.motion_global_body_angular_velocity_error_exp,
+        weight=1.0,
+        params={"command_name": "motion", "std": 3.14},
+    )
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-1e-1)
+    joint_limit = RewTerm(
+        func=mdp.joint_pos_limits,
+        weight=-10.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])},
+    )
+    undesired_contacts = RewTerm(
+        func=mdp.undesired_contacts,
+        weight=-0.1,
+        params={
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=[
+                    r"^(?!left_ankle_roll_link$)(?!right_ankle_roll_link$)(?!left_hip_yaw_link$)(?!right_hip_yaw_link$)(?!left_knee_link$)(?!right_knee_link$)(?!left_wrist_yaw_link$)(?!right_wrist_yaw_link$).+$"
+                ],
+            ),
+            "threshold": 1.0,
+        },
+    )
+
+
+@configclass
+class TerminationsCfg:
+    """Termination terms for the MDP."""
+
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    anchor_pos = DoneTerm(
+        func=mdp.bad_anchor_pos_z_only,
+        params={"command_name": "motion", "threshold": 0.25},
+    )
+    anchor_ori = DoneTerm(
+        func=mdp.bad_anchor_ori,
+        params={"asset_cfg": SceneEntityCfg("robot"), "command_name": "motion", "threshold": 0.8},
+    )
+    ee_body_pos = DoneTerm(
+        func=mdp.bad_motion_body_pos_z_only,
+        params={
+            "command_name": "motion",
+            "threshold": 0.5,
+            "body_names": [
+                "left_ankle_roll_link",
+                "right_ankle_roll_link",
+                "left_wrist_yaw_link",
+                "right_wrist_yaw_link",
+            ],
+        },
+    )
+
+
+@configclass
+class CurriculumCfg:
+    """Curriculum terms for the MDP."""
+
+    pass
+
+
+##
+# Environment configuration
+##
+
+
+@configclass
+class VisionDistillationEnvCfg(ManagerBasedRLEnvCfg):
+    """Configuration for the locomotion velocity-tracking environment."""
+
+    # Scene settings
+    scene: MySceneCfg = MySceneCfg(num_envs=4096, env_spacing=15)
+    # Basic settings
+    observations: ObservationsCfg = ObservationsCfg()
+    actions: ActionsCfg = ActionsCfg()
+    commands: CommandsCfg = CommandsCfg()
+    # MDP settings
+    rewards: RewardsCfg = RewardsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
+    events: EventCfg = EventCfg()
+    curriculum: CurriculumCfg = CurriculumCfg()
+
+    def __post_init__(self):
+        """Post initialization."""
+        # general settings
+        self.decimation = 4
+        self.episode_length_s = 10.0
+        # simulation settings
+        self.sim.dt = 0.005
+        self.sim.render_interval = self.decimation
+        self.sim.physics_material = self.scene.terrain.physics_material
+        self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
+        # viewer settings
+        # self.viewer.eye = (1.5, 1.5, 1.5)
+        # self.viewer.origin_type ="asset_root"
+        # self.viewer.asset_name = "robot"
+
+        self.viewer.origin_type = "world"
+        self.viewer.eye = (5.0, 5.0, 3.0)  # 相机在世界坐标系的位置
+        self.viewer.lookat = (0.0, 0.0, 0.0) # 相机盯着看的位置
