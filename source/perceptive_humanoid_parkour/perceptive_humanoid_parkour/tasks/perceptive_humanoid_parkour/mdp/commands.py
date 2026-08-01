@@ -126,6 +126,7 @@ class MotionCommand(CommandTerm):
         # Bin 统计适配
         update_dt = env.cfg.decimation * env.cfg.sim.dt
         self.bin_counts = [int(m.time_step_total // (1 / update_dt)) + 1 for m in self.motions]
+        self.bin_counts_t = torch.tensor(self.bin_counts, dtype=torch.float, device=self.device) # 形状为 (Num_Motions,)
         self.max_bin_count = max(self.bin_counts)
         self.bin_failed_count = torch.zeros((self.num_motions, self.max_bin_count), dtype=torch.float, device=self.device)
         self._current_bin_failed = torch.zeros((self.num_motions, self.max_bin_count), dtype=torch.float, device=self.device)
@@ -285,6 +286,7 @@ class MotionCommand(CommandTerm):
         self.metrics["error_joint_pos"] = torch.norm(self.joint_pos - self.robot_joint_pos, dim=-1)
         self.metrics["error_joint_vel"] = torch.norm(self.joint_vel - self.robot_joint_vel, dim=-1)
 
+    # motion均匀采样，bin按照难度进行加权采样
     def _adaptive_sampling(self, env_ids: Sequence[int]):
         episode_failed = self._env.termination_manager.terminated[env_ids]
         if torch.any(episode_failed):
@@ -321,6 +323,7 @@ class MotionCommand(CommandTerm):
             self.metrics["sampling_top1_prob"][target_env_ids] = pmax
             self.metrics["sampling_top1_bin"][target_env_ids] = imax.float() / m_bin_count
     
+    # motion按照数据长度加权采样，bin按照难度进行加权采样
     def _motion_weight_adaptive_sampling(self, env_ids: Sequence[int]):
         episode_failed = self._env.termination_manager.terminated[env_ids]
         if torch.any(episode_failed):
@@ -355,54 +358,71 @@ class MotionCommand(CommandTerm):
             self.metrics["sampling_top1_prob"][target_env_ids] = pmax
             self.metrics["sampling_top1_bin"][target_env_ids] = imax.float() / m_bin_count
 
+    # motion按bin失败均值加权采样，bin按难度加权采样；均匀底噪用 motion_uniform_ratio
+    def _motion_hierarchical_adaptive_sampling(self, env_ids: Sequence[int]):
+        episode_failed = self._env.termination_manager.terminated[env_ids]
+        if torch.any(episode_failed):
+            failed_env_ids = env_ids[episode_failed]
+            m_ids = self.motion_ids[failed_env_ids]
+            t_steps = self.time_steps[failed_env_ids]
+            m_totals = self.all_motion_lengths[m_ids]
+            m_bins = torch.tensor([self.bin_counts[i] for i in m_ids], device=self.device)
+            raw_indices = (t_steps * m_bins) // torch.clamp(m_totals, min=1)
+            bin_indices = torch.max(torch.zeros_like(raw_indices), torch.min(raw_indices, m_bins - 1))
+            for i, env_idx in enumerate(failed_env_ids):
+                self._current_bin_failed[m_ids[i], bin_indices[i]] += 1
+
+        # 有效 bin 上的失败均值（padding 为 0，用各自 bin_count 归一化）
+        motion_fail = self.bin_failed_count.sum(dim=-1) / self.bin_counts_t.clamp(min=1.0)
+        motion_weights = motion_fail + self.cfg.motion_uniform_ratio / float(self.num_motions)
+        self.motion_ids[env_ids] = torch.multinomial(motion_weights, len(env_ids), replacement=True)
+
+        unique_m_ids = torch.unique(self.motion_ids[env_ids])
+        for m_id in unique_m_ids:
+            m_env_mask = (self.motion_ids[env_ids] == m_id)
+            target_env_ids = env_ids[m_env_mask]
+            m_bin_count = self.bin_counts[m_id]
+            probs = self.bin_failed_count[m_id, :m_bin_count] + self.cfg.adaptive_uniform_ratio / float(m_bin_count)
+            probs = torch.nn.functional.pad(probs.unsqueeze(0).unsqueeze(0), (0, self.cfg.adaptive_kernel_size - 1), mode="replicate")
+            probs = torch.nn.functional.conv1d(probs, self.kernel.view(1, 1, -1)).view(-1)
+            probs /= probs.sum()
+            sampled_bins = torch.multinomial(probs, len(target_env_ids), replacement=True)
+            m_total = self.all_motion_lengths[m_id]
+            self.time_steps[target_env_ids] = ((sampled_bins + sample_uniform(0.0, 1.0, (len(target_env_ids),), device=self.device)) / m_bin_count * (m_total - 1)).long()
+
+            self.metrics["sampling_entropy"][target_env_ids] = -(probs * (probs + 1e-12).log()).sum() / torch.log(torch.tensor(max(m_bin_count, 2), device=self.device))
+            pmax, imax = probs.max(dim=0)
+            self.metrics["sampling_top1_prob"][target_env_ids] = pmax
+            self.metrics["sampling_top1_bin"][target_env_ids] = imax.float() / m_bin_count
+
     def _resample_command(self, env_ids: Sequence[int]):
         if len(env_ids) == 0: return
-        self._motion_weight_adaptive_sampling(env_ids)
+        self._motion_hierarchical_adaptive_sampling(env_ids)
         
-        # --- 核心新增：更新物体位姿和尺寸 ---
-        # 1. 计算当前 batch 要求的尺寸与预设尺寸的匹配关系 (N, M)
         target_sizes = self.object_size[env_ids]
         dists = torch.cdist(target_sizes, self.preset_sizes)
         best_match_indices = torch.argmin(dists, dim=-1)
-
-        # 2. 遍历物体池
         for i, name in enumerate(self.asset_names):
             asset = self.obj_assets[name]
-            
-            # 找到哪些环境需要这个特定的尺寸
             match_mask = (best_match_indices == i)
-            
-            # 默认全员“隐藏”
+            # 隐藏位姿按各 env 原点偏移，避免所有物体堆到世界 (0,0,-10)
             states_to_write = self.hide_state.repeat(len(env_ids), 1)
-            
+            states_to_write[:, :3] = self._env.scene.env_origins[env_ids] + self.hide_state[:3]
             if torch.any(match_mask):
-                # 1. 获取数量
                 num_matches = match_mask.sum()
-                
-                # 2. 定义角度限制 (15度)
                 deg_limit = 5.0
                 rad_limit = deg_limit * (np.pi / 180.0)
-                
-                # 3. 生成 [-rad_limit, +rad_limit] 之间的随机 Yaw 偏移
-                # torch.rand 是 [0, 1) -> (2*rand - 1) 是 [-1, 1]
                 random_yaw = (torch.rand(int(num_matches.item()), device=self.device) * 2.0 - 1.0) * rad_limit
-                
-                # 4. 构造增量四元数 (仅绕 Z 轴旋转)
                 zeros = torch.zeros_like(random_yaw)
                 quat_delta = quat_from_euler_xyz(zeros, zeros, random_yaw)
-                
-                # 5. 获取原始数据并叠加旋转
-                # 假设 self.object_quat_w 的形状是 [num_envs, 4]
                 original_quat = self.object_quat_w[env_ids][match_mask]
                 new_quat = quat_mul(original_quat, quat_delta)
-                
-                # 6. 应用到写入状态中
                 states_to_write[match_mask, 3:7] = new_quat
                 states_to_write[match_mask, :3] = self.object_pos_w[env_ids][match_mask]
 
-                # states_to_write[match_mask, 0] = 4.0 # test
-                # states_to_write[match_mask, 1] = 0.0 # test
-                # states_to_write[match_mask, 2] = 0.2 # test
+                # states_to_write[match_mask, 0] = 4.0 # depth perception test
+                # states_to_write[match_mask, 1] = 0.0 # depth perception test
+                # states_to_write[match_mask, 2] = 0.2 # depth perception test
             
             # 批量写入物理引擎
             asset.write_root_state_to_sim(states_to_write, env_ids=env_ids)
@@ -490,6 +510,7 @@ class MotionCommandCfg(CommandTermCfg):
     adaptive_kernel_size: int = 1
     adaptive_lambda: float = 0.8
     adaptive_uniform_ratio: float = 0.1
+    motion_uniform_ratio: float = 0.1
     adaptive_alpha: float = 0.001
     
     anchor_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(

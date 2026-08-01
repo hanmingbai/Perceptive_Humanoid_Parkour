@@ -6,7 +6,7 @@ from . import agents, motion_tracking_flat_env_cfg, vision_distillation_flat_env
 # Register Gym environments.
 ##
 
-# python scripts/rsl_rl/train.py --task PHP-MotionTracking-Flat-G1-v0 --num_envs=1
+# python scripts/rsl_rl/train.py --task PHP-MotionTracking-Flat-G1-v0 --num_envs=4096 --headless
 gym.register(
     id="PHP-MotionTracking-Flat-G1-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
@@ -18,7 +18,7 @@ gym.register(
     },
 )
 
-# python scripts/rsl_rl/train.py --task PHP-VisionDistillation-Flat-G1-v0 --num_envs=4 --enable_cameras
+# python scripts/rsl_rl/train.py --task PHP-VisionDistillation-Flat-G1-v0 --num_envs=1024 --enable_cameras --headless
 gym.register(
     id="PHP-VisionDistillation-Flat-G1-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
