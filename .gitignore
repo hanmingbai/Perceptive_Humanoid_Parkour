@@ -73,3 +73,19 @@ tests/
 # TacSL sensor
 **/tactile_record/*
 **/gelsight_r15_data/*
+
+# Unused unitree_description assets (G1 29-DoF parkour only)
+**/unitree_description/meshes/go2/
+**/unitree_description/meshes/sdk1/
+**/unitree_description/urdf/g1/assets/
+**/unitree_description/urdf/g1/g1_29dof_spherehand.urdf
+**/unitree_description/meshes/g1/left_hand_*
+**/unitree_description/meshes/g1/right_hand_*
+**/unitree_description/meshes/g1/*constraint*
+**/unitree_description/meshes/g1/torso_link.STL
+**/unitree_description/meshes/g1/torso_link_23dof_rev_1_0.STL
+**/unitree_description/meshes/g1/waist_roll_link.STL
+**/unitree_description/meshes/g1/waist_support_link.STL
+**/unitree_description/meshes/g1/waist_yaw_link.STL
+**/unitree_description/meshes/g1/left_wrist_roll_rubber_hand.STL
+**/unitree_description/meshes/g1/right_wrist_roll_rubber_hand.STL
