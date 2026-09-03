@@ -48,11 +48,10 @@ VELOCITY_RANGE = {
 }
 
 OBJ_SIZE_MAP = {
-    # "obj_0_3m_0_4m": (1.0, 0.3, 0.4),
-    # "obj_0_4m_0_4m": (1.0, 0.4, 0.4),
-    # "obj_1m": (3.0, 0.2, 0.75),
-    # "obj_1_5m": (3.0, 0.2, 1.1),
-    "obj_0_4m_1_0m_0_4m": (0.4, 1.0, 0.4),
+    "obj_100_40_65": (1.0, 0.40, 0.65),  # climb_09_z_65
+    "obj_100_70_35": (1.0, 0.70, 0.35),  # climb_14_z_35
+    "obj_100_50_55": (1.0, 0.50, 0.55),  # climb_20_z_55 (npz thickness 0.50; filename 40 is wrong)
+    "obj_100_30_45": (1.0, 0.30, 0.45),  # vault_over_z_45
 }
 
 def attach_object_pool(cfg_class):
@@ -148,8 +147,7 @@ class MySceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/torso_link", 
         offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)), 
         ray_alignment="yaw",
-        pattern_cfg=GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
-        # pattern_cfg=GridPatternCfg(resolution=0.1, size=[1.4, 1.4]),
+        pattern_cfg=GridPatternCfg(resolution=0.1, size=[1.6, 1.0]), # [1.4, 1.4]
         mesh_prim_paths=_MESH_TARGETS, 
         debug_vis=True,
     )
@@ -166,6 +164,7 @@ class CommandsCfg:
     motion = mdp.MotionCommandCfg(
         asset_name="robot",
         resampling_time_range=(1.0e9, 1.0e9),
+        sampling_mode="beyondmimic",  # None/none→uniform | "beyondmimic" | "sonic" | "uniform"
         debug_vis=True,
         pose_range={
             "x": (-0.05, 0.05),
@@ -199,7 +198,8 @@ class ObservationsCfg:
         # MotionCommand
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, noise=Unoise(n_min=-0.2, n_max=0.2)) # 3
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05)) # 3
-        velocity_command = ObsTerm(func=mdp.motion_velocity_command_bool, params={"command_name": "motion"}) # 31
+        # PHP 二阶段：用数据集 2d_cmd_rt 转成 3D 速度指令 [speed_rt, 0, sign(heading_rt)]
+        velocity_command = ObsTerm(func=mdp.motion_velocity_command_2d_rt, params={"command_name": "motion"})  # 3
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01)) # 29
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.5, n_max=0.5)) # 29
         actions = ObsTerm(func=mdp.last_action) # 29
@@ -264,7 +264,7 @@ class ObservationsCfg:
         )
 
         def __post_init__(self):
-            self.enable_corruption = True
+            self.enable_corruption = False # True 暂时关闭噪声
             self.concatenate_terms = True
 
     # observation groups
@@ -290,12 +290,41 @@ class EventCfg:
         },
     )
 
+    # Obstacle box friction / restitution (OBJ_SIZE_MAP pool).
+    object_physics_material = EventTerm(
+        func=mdp.randomize_object_pool_material,
+        mode="startup",
+        params={
+            "object_names": list(OBJ_SIZE_MAP.keys()),
+            "static_friction_range": (0.4, 1.3),
+            "dynamic_friction_range": (0.4, 1.1),
+            "restitution_range": (0.0, 0.5),
+            "num_buckets": 64,
+            "make_consistent": True,
+        },
+    )
+
+
+    # PHP: non-ankle default joint pos U[-0.01, 0.01]; ankle U[-0.03, 0.03].
+
     add_joint_default_pos = EventTerm(
         func=mdp.randomize_joint_default_pos,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["^(?!.*ankle).*$"]),
             "pos_distribution_params": (-0.01, 0.01),
+            "operation": "add",
+        },
+    )
+
+    add_ankle_default_pos = EventTerm(
+        func=mdp.randomize_joint_default_pos,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"]
+            ),
+            "pos_distribution_params": (-0.03, 0.03),
             "operation": "add",
         },
     )
@@ -310,11 +339,23 @@ class EventCfg:
     )
 
     # interval
+    # PHP: 每隔 Δt~U[1,3]s 给 root 加一次速度扰动
+    # vx,vy ~ U[-0.1, 0.1], vz ~ U[-0.05, 0.05], ωx,ωy,ωz ~ U[-0.1, 0.1]
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity,
         mode="interval",
         interval_range_s=(1.0, 3.0),
-        params={"velocity_range": VELOCITY_RANGE},
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "velocity_range": {
+                "x": (-0.1, 0.1),
+                "y": (-0.1, 0.1),
+                "z": (-0.05, 0.05),
+                "roll": (-0.1, 0.1),
+                "pitch": (-0.1, 0.1),
+                "yaw": (-0.1, 0.1),
+            },
+        },
     )
 
     # # reset camera
@@ -349,7 +390,6 @@ class RewardsCfg:
         weight=0.5,
         params={"command_name": "motion", "std": 0.4},
     )
-    
     # motion_global_anchor_lin_vel_xy = RewTerm(
     #     func=mdp.motion_global_anchor_lin_vel_xy_error_exp,
     #     weight=1.0,
@@ -361,7 +401,17 @@ class RewardsCfg:
     #     weight=0.5,
     #     params={"command_name": "motion", "std": 0.25},
     # )
-
+    # 四肢末端 / 其余 keybody 的 body_names 在 robot 的 flat_env_cfg 里赋值。
+    motion_ee_pos = RewTerm(
+        func=mdp.motion_relative_body_position_error_exp,
+        weight=2.0, # 1.0
+        params={"command_name": "motion", "std": 0.3},
+    )
+    motion_ee_ori = RewTerm(
+        func=mdp.motion_relative_body_orientation_error_exp,
+        weight=2.0, # 1.0
+        params={"command_name": "motion", "std": 0.4},
+    )
     motion_body_pos = RewTerm(
         func=mdp.motion_relative_body_position_error_exp,
         weight=1.0,
@@ -390,7 +440,7 @@ class RewardsCfg:
     )
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
-        weight=-0.1,
+        weight=-0.5, # -0.1
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
@@ -402,6 +452,16 @@ class RewardsCfg:
         },
     )
 
+    # is_contact_obstacle = RewTerm(
+    #     func=mdp.contact_forces,
+    #     weight=-10.0, # 负权重表示惩罚
+    #     params={
+    #         "sensor_cfg": SceneEntityCfg("robot", body_names=".*"), # 检查机器人所有 link
+    #         "threshold": 1.0, # 超过 1N 的力就惩罚
+    #         "target_cfg": SceneEntityCfg("obstacle") # 目标是障碍物
+    #     }
+    # )
+
 
 @configclass
 class TerminationsCfg:
@@ -410,7 +470,7 @@ class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     anchor_pos = DoneTerm(
         func=mdp.bad_anchor_pos_z_only,
-        params={"command_name": "motion", "threshold": 0.25},
+        params={"command_name": "motion", "threshold": 0.5},
     )
     anchor_ori = DoneTerm(
         func=mdp.bad_anchor_ori,
@@ -448,7 +508,7 @@ class VisionDistillationEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the locomotion velocity-tracking environment."""
 
     # Scene settings
-    scene: MySceneCfg = MySceneCfg(num_envs=4096, env_spacing=15)
+    scene: MySceneCfg = MySceneCfg(num_envs=4096, env_spacing=30.0) # 15.0
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()

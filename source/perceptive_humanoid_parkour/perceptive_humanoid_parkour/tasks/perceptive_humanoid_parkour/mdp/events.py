@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import torch
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Sequence
 
 import isaaclab.utils.math as math_utils
-from isaaclab.assets import Articulation
+from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs.mdp.events import _randomize_prop_by_op
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
+    from isaaclab.managers import EventTermCfg
 
 
 def randomize_joint_default_pos(
@@ -98,3 +99,73 @@ def randomize_rigid_body_com(
 #     for i, env_id in enumerate(env_ids):
 #         prim = camera.get_prim_at_env_index(env_id) # 通过 USD API 修改对应环境的相机焦距
 #         prim.GetAttribute("focalLength").Set(random_focal_lengths[i].item())
+
+class randomize_object_pool_material(ManagerTermBase):
+    """Domain-randomize physics materials on all obstacle boxes in the object pool.
+
+    Samples a shared set of material buckets once at startup (PhysX unique-material
+    limit), then assigns them randomly per env to every ``RigidObject`` named in
+    ``object_names`` (typically ``OBJ_SIZE_MAP`` keys).
+    """
+
+    def __init__(self, cfg: EventTermCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+
+        object_names: Sequence[str] = cfg.params.get("object_names", ())
+        self.assets: list[RigidObject] = []
+        for name in object_names:
+            asset = env.scene[name]
+            if not isinstance(asset, RigidObject):
+                raise ValueError(
+                    f"randomize_object_pool_material expects RigidObject, got "
+                    f"'{name}' with type '{type(asset)}'."
+                )
+            self.assets.append(asset)
+
+        static_friction_range = cfg.params.get("static_friction_range", (1.0, 1.0))
+        dynamic_friction_range = cfg.params.get("dynamic_friction_range", (1.0, 1.0))
+        restitution_range = cfg.params.get("restitution_range", (0.0, 0.0))
+        num_buckets = int(cfg.params.get("num_buckets", 1))
+
+        range_list = [static_friction_range, dynamic_friction_range, restitution_range]
+        ranges = torch.tensor(range_list, device="cpu")
+        self.material_buckets = math_utils.sample_uniform(
+            ranges[:, 0], ranges[:, 1], (num_buckets, 3), device="cpu"
+        )
+        if cfg.params.get("make_consistent", False):
+            self.material_buckets[:, 1] = torch.min(
+                self.material_buckets[:, 0], self.material_buckets[:, 1]
+            )
+        self._num_buckets = num_buckets
+
+    def __call__(
+        self,
+        env: ManagerBasedEnv,
+        env_ids: torch.Tensor | None,
+        object_names: Sequence[str],
+        static_friction_range: tuple[float, float],
+        dynamic_friction_range: tuple[float, float],
+        restitution_range: tuple[float, float],
+        num_buckets: int,
+        make_consistent: bool = False,
+    ):
+        del object_names, static_friction_range, dynamic_friction_range
+        del restitution_range, num_buckets, make_consistent  # used only in __init__
+
+        if not self.assets:
+            return
+
+        if env_ids is None:
+            env_ids = torch.arange(env.scene.num_envs, device="cpu")
+        else:
+            env_ids = env_ids.cpu()
+
+        for asset in self.assets:
+            total_num_shapes = asset.root_physx_view.max_shapes
+            bucket_ids = torch.randint(
+                0, self._num_buckets, (len(env_ids), total_num_shapes), device="cpu"
+            )
+            material_samples = self.material_buckets[bucket_ids]
+            materials = asset.root_physx_view.get_material_properties()
+            materials[env_ids] = material_samples[:]
+            asset.root_physx_view.set_material_properties(materials, env_ids)

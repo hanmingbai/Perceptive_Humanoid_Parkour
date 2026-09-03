@@ -5,10 +5,17 @@ from isaaclab_rl.rsl_rl import RslRlMLPModelCfg
 @configclass
 class G1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 30000
-    save_interval = 500
-    experiment_name = "g1_motion_tracking"
+    max_iterations = 100000
+    save_interval = 1000
+    experiment_name = "g1_flat_motion_tracking"
     empirical_normalization = True
+
+    # policy = RslRlPpoActorCriticCfg(
+    #     init_noise_std=1.0,
+    #     actor_hidden_dims=[512, 256, 128],
+    #     critic_hidden_dims=[512, 256, 128],
+    #     activation="elu",
+    # )
 
     actor = RslRlMLPModelCfg(
         class_name="MLPModel",

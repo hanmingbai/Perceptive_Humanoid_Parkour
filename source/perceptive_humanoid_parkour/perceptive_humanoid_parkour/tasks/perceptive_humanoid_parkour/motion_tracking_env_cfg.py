@@ -44,11 +44,10 @@ VELOCITY_RANGE = {
 }
 
 OBJ_SIZE_MAP = {
-    # "obj_0_3m_0_4m": (1.0, 0.3, 0.4),
-    # "obj_0_4m_0_4m": (1.0, 0.4, 0.4),
-    # "obj_1m": (3.0, 0.2, 0.75),
-    # "obj_1_5m": (3.0, 0.2, 1.1),
-    "obj_0_4m_1_0m_0_4m": (0.4, 1.0, 0.4),
+    "obj_100_40_65": (1.0, 0.40, 0.65),  # climb_09_z_65
+    "obj_100_70_35": (1.0, 0.70, 0.35),  # climb_14_z_35
+    "obj_100_50_55": (1.0, 0.50, 0.55),  # climb_20_z_55 (npz thickness 0.50; filename 40 is wrong)
+    "obj_100_30_45": (1.0, 0.30, 0.45),  # vault_over_z_45
 }
 
 def attach_object_pool(cfg_class):
@@ -108,23 +107,6 @@ class MySceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # test_obj = RigidObjectCfg(
-    #     prim_path="{ENV_REGEX_NS}/test_block",
-    #     spawn=sim_utils.CuboidCfg(
-    #         size=(0.5, 0.5, 0.5),
-    #         # 必须：开启碰撞
-    #         collision_props=sim_utils.CollisionPropertiesCfg(),
-    #         # 核心修复：必须提供刚体属性，哪怕是空的或设为运动学
-    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-    #             rigid_body_enabled=True,   # 显式开启刚体
-    #             kinematic_enabled=True,    # 建议设为 True，防止它因为没支撑点而掉入虚空
-    #             disable_gravity=True       # 既然是障碍物，通常不需要重力
-    #         ),
-    #         # 建议：加个颜色方便在 UI 里一眼看到它
-    #         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 1.0)),
-    #     ),
-    #     init_state=RigidObjectCfg.InitialStateCfg(pos=(1.0, 0.0, 0.25)),
-    # )
 
     # robots
     robot: ArticulationCfg = MISSING
@@ -163,6 +145,7 @@ class CommandsCfg:
     motion = mdp.MotionCommandCfg(
         asset_name="robot",
         resampling_time_range=(1.0e9, 1.0e9),
+        sampling_mode="sonic",  # 一阶段专家：全局 bin 失败率加权
         debug_vis=True,
         pose_range={
             "x": (-0.05, 0.05),
@@ -264,15 +247,44 @@ class EventCfg:
         },
     )
 
+    # Obstacle box friction / restitution (OBJ_SIZE_MAP pool).
+    object_physics_material = EventTerm(
+        func=mdp.randomize_object_pool_material,
+        mode="startup",
+        params={
+            "object_names": list(OBJ_SIZE_MAP.keys()),
+            "static_friction_range": (0.4, 1.3),
+            "dynamic_friction_range": (0.4, 1.1),
+            "restitution_range": (0.0, 0.5),
+            "num_buckets": 64,
+            "make_consistent": True,
+        },
+    )
+
+
+    # PHP: non-ankle default joint pos U[-0.01, 0.01]; ankle U[-0.03, 0.03].
     add_joint_default_pos = EventTerm(
         func=mdp.randomize_joint_default_pos,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["^(?!.*ankle).*$"]),
             "pos_distribution_params": (-0.01, 0.01),
             "operation": "add",
         },
     )
+
+    add_ankle_default_pos = EventTerm(
+        func=mdp.randomize_joint_default_pos,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"]
+            ),
+            "pos_distribution_params": (-0.03, 0.03),
+            "operation": "add",
+        },
+    )
+    
 
     base_com = EventTerm(
         func=mdp.randomize_rigid_body_com,
@@ -283,12 +295,23 @@ class EventCfg:
         },
     )
 
-    # interval
+    # PHP: 每隔 Δt~U[1,3]s 给 root 加一次速度扰动
+    # vx,vy ~ U[-0.1, 0.1], vz ~ U[-0.05, 0.05], ωx,ωy,ωz ~ U[-0.1, 0.1]
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity,
         mode="interval",
         interval_range_s=(1.0, 3.0),
-        params={"velocity_range": VELOCITY_RANGE},
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "velocity_range": {
+                "x": (-0.1, 0.1),
+                "y": (-0.1, 0.1),
+                "z": (-0.05, 0.05),
+                "roll": (-0.1, 0.1),
+                "pitch": (-0.1, 0.1),
+                "yaw": (-0.1, 0.1),
+            },
+        },
     )
 
 
@@ -307,6 +330,17 @@ class RewardsCfg:
         params={"command_name": "motion", "std": 0.4},
     )
 
+    # 四肢末端 / 其余 keybody 的 body_names 在 robot 的 flat_env_cfg 里赋值。
+    motion_ee_pos = RewTerm(
+        func=mdp.motion_relative_body_position_error_exp,
+        weight=2.0, # 1.0
+        params={"command_name": "motion", "std": 0.3},
+    )
+    motion_ee_ori = RewTerm(
+        func=mdp.motion_relative_body_orientation_error_exp,
+        weight=2.0, # 1.0
+        params={"command_name": "motion", "std": 0.4},
+    )
     motion_body_pos = RewTerm(
         func=mdp.motion_relative_body_position_error_exp,
         weight=1.0,
@@ -335,7 +369,7 @@ class RewardsCfg:
     )
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
-        weight=-0.1,
+        weight=-0.5, # -0.1
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
@@ -365,7 +399,7 @@ class TerminationsCfg:
         func=mdp.bad_motion_body_pos_z_only,
         params={
             "command_name": "motion",
-            "threshold": 0.25,
+            "threshold": 0.25, # 0.25
             "body_names": [
                 "left_ankle_roll_link",
                 "right_ankle_roll_link",
@@ -388,12 +422,13 @@ class CurriculumCfg:
 ##
 
 
+
 @configclass
 class MotionTrackingEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the locomotion velocity-tracking environment."""
 
     # Scene settings
-    scene: MySceneCfg = MySceneCfg(num_envs=4096, env_spacing=15.0)
+    scene: MySceneCfg = MySceneCfg(num_envs=4096, env_spacing=30.0) # 15.0
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()

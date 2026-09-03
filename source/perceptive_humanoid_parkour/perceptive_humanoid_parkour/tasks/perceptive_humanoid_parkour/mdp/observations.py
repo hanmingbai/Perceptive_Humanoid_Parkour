@@ -122,6 +122,23 @@ def motion_velocity_command_bool(env: ManagerBasedEnv, command_name: str) -> tor
 
     return torch.cat([cmd_x, zeros, zeros], dim=-1)
 
+
+def motion_velocity_command_2d_rt(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    """PHP 二阶段视觉蒸馏：把数据集 ``2d_cmd_rt`` 转成 3 维速度指令。
+
+    从 ``command.cmd_2d_rt`` 取当前帧 ``[speed_rt, heading_rt_deg_s]``，
+    再映射为 policy 用的 (num_envs, 3)：
+      [speed_rt, 0, sign(heading_rt)]
+    其中 ``heading_rt`` 是 cmd 路径偏航角速度 (°/s)，``sign`` 为 -1 / 0 / +1。
+    缺字段时 command 侧填零，这里自然得到 [0, 0, 0]。
+    """
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    cmd_rt = command.cmd_2d_rt  # (N, 2): [speed_rt, heading_rt_deg_s]
+    speed = cmd_rt[:, 0:1]
+    turn = torch.sign(cmd_rt[:, 1:2])
+    zeros = torch.zeros_like(speed)
+    return torch.cat([speed, zeros, turn], dim=-1)
+
 # for perceptive distillation
 def get_depth_data(env, sensor_name: str):
     """从指定的 TiledCamera 获取归一化的拉平深度数据"""

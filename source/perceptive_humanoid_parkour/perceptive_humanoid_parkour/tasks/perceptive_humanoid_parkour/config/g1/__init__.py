@@ -4,9 +4,14 @@ from . import agents, motion_tracking_flat_env_cfg, vision_distillation_flat_env
 
 ##
 # Register Gym environments.
+
+# 大量 omni.graph.core.tests / omni.kit.test 报错连锁出现
+# export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 ##
 
 # python scripts/rsl_rl/train.py --task PHP-MotionTracking-Flat-G1-v0 --num_envs=4096 --headless
+# python scripts/rsl_rl/play.py --task PHP-MotionTracking-Flat-G1-v0 --num_envs=16 --headless
 gym.register(
     id="PHP-MotionTracking-Flat-G1-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
@@ -19,6 +24,7 @@ gym.register(
 )
 
 # python scripts/rsl_rl/train.py --task PHP-VisionDistillation-Flat-G1-v0 --num_envs=1024 --enable_cameras --headless
+# python scripts/rsl_rl/play_wo_termination.py --task PHP-VisionDistillation-Flat-G1-v0 --num_envs=16 --enable_cameras
 gym.register(
     id="PHP-VisionDistillation-Flat-G1-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",

@@ -52,6 +52,8 @@ class VisionDAggerPPO:
         # [DAgger 参数]
         teacher: MLPModel | None = None,     # [DAgger 改动] 传入 Teacher 模型
         dagger_loss_mix_ratio: float = 0.5,  # [DAgger 改动] 初始混合比例（此处仅作兼容保留）
+        dagger_loss_coef: float = 10.0,
+        max_iters: int = 100000, # 课程总长 K；λ_D=max(0.1, 1-k/(K/2))，λ_PPO>0.1 后才开 adaptive KL
         # RND parameters
         rnd_cfg: dict | None = None,
         # Symmetry parameters
@@ -117,9 +119,17 @@ class VisionDAggerPPO:
         if self.teacher:
             self.teacher.eval() # 专家模型永远设为 eval 模式，不参与训练
         self.dagger_loss_mix_ratio = dagger_loss_mix_ratio
+        self.dagger_loss_coef = dagger_loss_coef
         # --- [改动 1: 初始化迭代次数统计] ---
         self.current_iter = 0
-        self.max_iters = 80000 # 占位符，由 runner 动态设置 ---------------------------------------------- 人为设置
+        self.max_iters = int(max_iters)
+        # PHP: adaptive KL/LR only when λ_PPO > 0.1 ⇔ k > K/20
+        self._adaptive_kl_start_iter = int(self.max_iters / 20.0)
+        self._logged_adaptive_kl_enable = False
+        print(
+            f"[VisionDAgger] curriculum K=max_iters={self.max_iters}, "
+            f"λ_D=max(0.1, 1-k/(K/2)), adaptive KL/LR after iter {self._adaptive_kl_start_iter} (λ_PPO>0.1)"
+        )
 
         # Create the optimizer
         self.optimizer = resolve_optimizer(optimizer)(
@@ -231,13 +241,13 @@ class VisionDAggerPPO:
         # [DAgger 改动] 记录蒸馏损失统计
         mean_dagger_loss = 0 if self.teacher else None
         
-        # --- [改动 2: 计算动态 alpha] ---
-        # alpha = max(0.1, 1 - k / (K / 2))
+        # PHP Eq.3: L = λ_PPO L_PPO + λ_D L_D, λ_PPO + λ_D = 1
+        # λ_D(k) = max(0.1, 1 - k / (K/2)), K = max_iters
         k = self.current_iter
-        K = self.max_iters
-        alpha = max(0.1, 1.0 - k / (K / 2.0))
-        # print(f"alpha{alpha}, {k}, {K}")
-        self.current_iter += 1 # 更新迭代步数
+        K = max(int(self.max_iters), 1)
+        alpha = max(0.1, 1.0 - k / (K / 2.0))  # λ_D
+        lambda_ppo = 1.0 - alpha
+        self.current_iter += 1
 
         # Get mini batch generator
         if self.actor.is_recurrent or self.critic.is_recurrent:
@@ -288,15 +298,29 @@ class VisionDAggerPPO:
 
             # [DAgger 改动] 计算 DAgger Loss
             dagger_loss = torch.tensor(0.0, device=self.device)
+            dagger_mse = torch.tensor(0.0, device=self.device)
             if self.teacher:
                 with torch.no_grad():
                     # 专家模型通过全量观测 (obs_groups["teacher"]) 得到动作
                     expert_actions = self.teacher(batch.observations)
                 # 学生当前输出的确定性均值用于模仿
                 student_actions_mean = self.actor.output_distribution_params[0]
-                dagger_loss = torch.nn.functional.mse_loss(student_actions_mean, expert_actions)
+                dagger_mse = torch.nn.functional.mse_loss(student_actions_mean, expert_actions)
+                dagger_loss = dagger_mse * self.dagger_loss_coef
 
-            # Compute KL divergence and adapt the learning rate
+            # PHP: 只冻结「按 KL 改 lr」；KL 统计和 multi-GPU 同步始终走。
+            # λ_PPO<=0.1 时不根据 KL 缩放 lr，避免 init_std=0.01 时第一轮把 lr 打到 1e-5。
+            enable_adaptive_kl = lambda_ppo > 0.1
+            if (
+                enable_adaptive_kl
+                and self.schedule == "adaptive"
+                and not self._logged_adaptive_kl_enable
+            ):
+                print(
+                    f"[VisionDAgger] enable adaptive KL/LR at iter {k} "
+                    f"(λ_PPO={lambda_ppo:.3f} > 0.1, K={K})"
+                )
+                self._logged_adaptive_kl_enable = True
             if self.desired_kl is not None and self.schedule == "adaptive":
                 with torch.inference_mode():
                     kl = self.actor.get_kl_divergence(batch.old_distribution_params, distribution_params)  # type: ignore
@@ -307,8 +331,8 @@ class VisionDAggerPPO:
                         torch.distributed.all_reduce(kl_mean, op=torch.distributed.ReduceOp.SUM)
                         kl_mean /= self.gpu_world_size
 
-                    # Update the learning rate only on the main process
-                    if self.gpu_global_rank == 0:
+                    # 仅 rank0 + warmup 结束后才按 KL 改 lr；warmup 期间保持初始 lr
+                    if enable_adaptive_kl and self.gpu_global_rank == 0:
                         if kl_mean > self.desired_kl * 2.0:
                             self.learning_rate = max(1e-5, self.learning_rate / 1.5)
                         elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
@@ -427,9 +451,9 @@ class VisionDAggerPPO:
             # Symmetry loss
             if mean_symmetry_loss is not None:
                 mean_symmetry_loss += symmetry_loss.item()
-            # DAgger loss
+            # DAgger loss：log 未缩放 MSE，便于和旧 run 对比模仿质量
             if mean_dagger_loss is not None:
-                mean_dagger_loss += dagger_loss.item()
+                mean_dagger_loss += dagger_mse.item()
 
         # Divide the losses by the number of updates
         num_updates = self.num_learning_epochs * self.num_mini_batches
@@ -456,8 +480,8 @@ class VisionDAggerPPO:
             loss_dict["symmetry"] = mean_symmetry_loss
         if mean_dagger_loss is not None:
             loss_dict["dagger"] = mean_dagger_loss / num_updates
-            # --- [改动 3: 记录当前的 alpha 值用于监控] ---
-            loss_dict["dagger_alpha"] = alpha
+            loss_dict["dagger_alpha"] = alpha  # λ_D
+            loss_dict["lambda_ppo"] = lambda_ppo
 
         return loss_dict
 
@@ -540,6 +564,10 @@ class VisionDAggerPPO:
 
         # Resolve symmetry config if used
         cfg["algorithm"] = resolve_symmetry_config(cfg["algorithm"], env)
+
+        # 课程总长 K：algorithm.max_iters 未设时跟 runner.max_iterations 对齐
+        if cfg["algorithm"].get("max_iters") in (None, 0):
+            cfg["algorithm"]["max_iters"] = int(cfg.get("max_iterations", 100000))
 
         # [Vision 适配] 动态计算本体感知维度，识别并剥离 5046 维深度图
         total_policy_dim = obs["policy"].shape[1]

@@ -19,6 +19,7 @@ from perceptive_humanoid_parkour.robots.g1 import G1_ACTION_SCALE, G1_CYLINDER_C
 from perceptive_humanoid_parkour.tasks.perceptive_humanoid_parkour.config.g1.agents.rsl_rl_vision_distill_cfg import LOW_FREQ_SCALE
 from perceptive_humanoid_parkour.tasks.perceptive_humanoid_parkour.motion_tracking_env_cfg import MotionTrackingEnvCfg
 
+import glob
 import os
 
 from isaaclab.utils import configclass
@@ -49,10 +50,34 @@ class G1MotionTrackingFlatEnvCfg(MotionTrackingEnvCfg):
             "right_elbow_link",
             "right_wrist_yaw_link",
         ]
+        ee_body_names = [
+            "left_ankle_roll_link",
+            "right_ankle_roll_link",
+            "left_wrist_yaw_link",
+            "right_wrist_yaw_link",
+        ]
+        other_body_names = [
+            "pelvis",
+            "left_hip_roll_link",
+            "left_knee_link",
+            "right_hip_roll_link",
+            "right_knee_link",
+            "left_shoulder_roll_link",
+            "left_elbow_link",
+            "right_shoulder_roll_link",
+            "right_elbow_link",
+        ]
+        self.rewards.motion_ee_pos.params["body_names"] = ee_body_names
+        self.rewards.motion_ee_ori.params["body_names"] = ee_body_names
+        self.rewards.motion_body_pos.params["body_names"] = other_body_names
+        self.rewards.motion_body_ori.params["body_names"] = other_body_names
 
-        # mm_parkour：传文件夹，由 MotionCommand 自动加载目录下全部 .npz
-        self.commands.motion.motion_file = os.path.normpath(
-            os.path.join(os.path.dirname(__file__), "../../../../../../../motions/mm_parkour")
+        # repo_root/motions/... (this file is .../config/g1/*.py → parents[7] = repo root)
+        motion_dir = os.path.join(
+            os.path.dirname(__file__), *([".."] * 7), "motions", "mm_php_post_keep_0812"
+        )
+        self.commands.motion.motion_file = sorted(
+            glob.glob(os.path.join(os.path.abspath(motion_dir), "*.npz"))
         )
 
 
