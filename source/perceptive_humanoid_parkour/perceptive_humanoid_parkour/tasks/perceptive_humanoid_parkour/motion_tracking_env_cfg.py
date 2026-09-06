@@ -374,7 +374,7 @@ class RewardsCfg:
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
                 body_names=[
-                    r"^(?!left_ankle_roll_link$)(?!right_ankle_roll_link$)(?!left_wrist_yaw_link$)(?!right_wrist_yaw_link$).+$"
+                    r"^(?!left_ankle_roll_link$)(?!right_ankle_roll_link$)(?!left_hip_yaw_link$)(?!right_hip_yaw_link$)(?!left_knee_link$)(?!right_knee_link$)(?!left_wrist_yaw_link$)(?!right_wrist_yaw_link$).+$"
                 ],
             ),
             "threshold": 1.0,

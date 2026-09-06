@@ -20,6 +20,8 @@ pip install --upgrade pip
 
 ### 2. 安装 Isaac Sim 5.1 与 PyTorch
 
+> **显卡驱动：** Isaac Sim 5.1 官方验证的是 **NVIDIA 580**（Linux 建议 `580.65.06+`，优先 `nvidia-driver-580-open`）。**不要使用 595**（以及未验证的 610 NFB），否则 `--enable_cameras` / depth 训练或回放时容易核心转储。若 apt 会自动升到 595，请钉在 580。或者使用height_dagger替代depth_dagger。
+
 参考官方教程：
 
 [Installation using Isaac Sim Pip Package (Isaac Lab v2.3.2)](https://isaac-sim.github.io/IsaacLab/v2.3.2/source/setup/installation/pip_installation.html)
@@ -82,8 +84,11 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # Motion tracking
 python scripts/rsl_rl/train.py --task PHP-MotionTracking-Flat-G1-v0 --num_envs=4096 --headless
 
-# Vision distillation（需相机）
+# Vision distillation（需相机， 若环境数多需要大量显存）
 python scripts/rsl_rl/train.py --task PHP-VisionDistillation-Flat-G1-v0 --num_envs=1024 --enable_cameras --headless
+
+# Height-map distillation（无相机，12GB 可开更多环境）
+python scripts/rsl_rl/train.py --task PHP-HeightDistillation-Flat-G1-v0 --num_envs=4096 --headless
 ```
 
 ### 回放（Play）
@@ -94,6 +99,9 @@ python scripts/rsl_rl/play.py --task PHP-MotionTracking-Flat-G1-v0 --num_envs=16
 
 # Vision distillation（需相机）
 python scripts/rsl_rl/play.py --task PHP-VisionDistillation-Flat-G1-v0 --num_envs=16 --enable_cameras
+
+# Height-map distillation
+python scripts/rsl_rl/play.py --task PHP-HeightDistillation-Flat-G1-v0 --num_envs=16
 ```
 
 通过 `--checkpoint` 指定其他权重，例如：
@@ -110,25 +118,25 @@ python scripts/rsl_rl/play.py \
 
 ## MuJoCo Sim2Sim
 
-`scripts/sim2sim/php_sim2sim.py` 在 MuJoCo 中加载视觉蒸馏策略，观测与 `PHP-VisionDistillation-Flat-G1-v0` 的 policy 输入对齐（含 58×87 深度图）。
+`scripts/sim2sim/php_depth_sim2sim.py` 加载 **depth** 蒸馏策略（`VisionMLPModel`，58×87 深度图）。  
+`scripts/sim2sim/php_height_sim2sim.py` 加载 **height** 蒸馏策略（`MLPModel`，17×11 高程图），与 `PHP-HeightDistillation-Flat-G1-v0` 对齐。
 
 ### 快速运行
 
 ```bash
-python scripts/sim2sim/php_sim2sim.py
+# Depth 策略
+python scripts/sim2sim/php_depth_sim2sim.py
+
+# Height-map 策略
+python scripts/sim2sim/php_height_sim2sim.py \
+  --policy checkpoints/g1_flat_height_distillation/model_51000.pt
 ```
 
-默认使用：
+默认 checkpoint：
 
-- 策略：`checkpoints/g1_flat_vision_distillation/model_99999.pt`
+- depth：`checkpoints/g1_flat_vision_distillation/model_99999.pt`
+- height：`checkpoints/g1_flat_height_distillation/model_51000.pt`
 - 场景：`source/.../assets/unitree_description/mjcf/parkour.xml`
-
-### 指定 Checkpoint
-
-```bash
-python scripts/sim2sim/php_sim2sim.py \
-  --policy checkpoints/g1_flat_vision_distillation/model_99999.pt
-```
 
 ### 常用参数
 
@@ -139,7 +147,8 @@ python scripts/sim2sim/php_sim2sim.py \
 | `--device` | `cuda` 或 `cpu`（默认 `cuda`） |
 | `--headless` | 无窗口运行 |
 | `--record_video` | 录制视频 |
-| `--no_depth_window` | 关闭深度图调试窗口 |
+| `--no_depth_window` | depth 脚本：关闭深度图窗口 |
+| `--no_height_window` | height 脚本：关闭高程图窗口 |
 | `--num_obstacles` | 障碍物数量（最多 12） |
 | `--seed` | 随机赛道种子 |
 
@@ -154,7 +163,7 @@ python scripts/sim2sim/php_sim2sim.py \
 | → | 右转（heading=-1） |
 | Backspace | 重置机器人姿态 |
 
-策略速度指令为 **0 或 1**，转向为 **-1 / 0 / +1**。
+策略速度指令为 **0 或 1**，转向为 **-1 / 0 / +1**，越过障碍物时需要一直按前进不能同时按其他按键。
 
 ---
 
@@ -163,6 +172,5 @@ python scripts/sim2sim/php_sim2sim.py \
 | Task ID | 说明 |
 |---------|------|
 | `PHP-MotionTracking-Flat-G1-v0` | 平地 motion tracking |
-| `PHP-VisionDistillation-Flat-G1-v0` | 视觉蒸馏（主任务） |
-| `PHP-VisionDistillation-Flat-G1-Wo-State-Estimation-v0` | 无状态估计版本 |
-| `PHP-VisionDistillation-Flat-G1-Low-Freq-v0` | 低频控制版本 |
+| `PHP-VisionDistillation-Flat-G1-v0` | 视觉蒸馏（主任务，depth） |
+| `PHP-HeightDistillation-Flat-G1-v0` | 高程图蒸馏（无相机） |

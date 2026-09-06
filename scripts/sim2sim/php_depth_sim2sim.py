@@ -227,6 +227,23 @@ def velocity_command_2d_rt(speed: float, heading_deg_s: float) -> np.ndarray:
     return np.array([1.0 if speed > 0.5 else 0.0, 0.0, float(np.sign(heading_deg_s))], dtype=np.float32)
 
 
+def glfw_window_or_none(window):
+    """pyGLFW may return a NULL ctypes pointer that is not Python ``None``.
+
+    Passing that to ``glfw.get_key`` aborts: ``Assertion `window != NULL' failed``.
+    The MuJoCo viewer owns GLFW on another thread, so the main-thread current
+    context is often this empty pointer (height sim2sim has no offscreen Renderer).
+    """
+    if window is None:
+        return None
+    try:
+        if not window:
+            return None
+    except Exception:
+        return None
+    return window
+
+
 def load_vision_policy(policy_path: str, device: str) -> torch.nn.Module:
     """Load VisionMLPModel from an rsl_rl ``model_*.pt`` checkpoint."""
     ckpt = torch.load(policy_path, map_location=device, weights_only=False)
@@ -440,12 +457,7 @@ class PhpSim2SimController:
 
     def _poll_held_keys(self) -> None:
         """Read currently held arrows. Viewer callback has no press/release bit."""
-        window = self._glfw_window
-        if window is None:
-            ctx = glfw.get_current_context()
-            if ctx is not None:
-                self._glfw_window = ctx
-                window = ctx
+        window = glfw_window_or_none(self._glfw_window)
         if window is None:
             return
         try:
@@ -453,6 +465,7 @@ class PhpSim2SimController:
             left = glfw.get_key(window, glfw.KEY_LEFT) == glfw.PRESS
             right = glfw.get_key(window, glfw.KEY_RIGHT) == glfw.PRESS
         except Exception:
+            self._glfw_window = None
             return
         self.speed_rt = 1.0 if up else 0.0
         if left and not right:
@@ -467,11 +480,11 @@ class PhpSim2SimController:
         """Viewer thread: cache the GLFW window and sample hold state.
         Arrow / Backspace only: WASD/Space/R are MuJoCo viewer shortcuts.
         """
-        ctx = glfw.get_current_context()
+        ctx = glfw_window_or_none(glfw.get_current_context())
         if ctx is not None:
             self._glfw_window = ctx
         if keycode == glfw.KEY_BACKSPACE:
-            window = self._glfw_window
+            window = glfw_window_or_none(self._glfw_window)
             if window is not None and glfw.get_key(window, glfw.KEY_BACKSPACE) == glfw.PRESS:
                 self._request_reset = True
             return

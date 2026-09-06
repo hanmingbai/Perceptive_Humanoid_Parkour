@@ -8,6 +8,7 @@
 from .distillation import Distillation
 from .ppo import PPO
 from .dagger_ppo import DAggerPPO
+from .height_dagger_ppo import HeightDAggerPPO
 from .vision_dagger_ppo import VisionDAggerPPO
 
-__all__ = ["PPO", "Distillation", "DAggerPPO", "VisionDAggerPPO"]
+__all__ = ["PPO", "Distillation", "DAggerPPO", "HeightDAggerPPO", "VisionDAggerPPO"]
